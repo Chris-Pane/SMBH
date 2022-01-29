@@ -1,4 +1,3 @@
-import sys
 from typing import Tuple
 import numpy as np
 import matplotlib.pyplot as plt
@@ -7,12 +6,19 @@ from scipy import optimize
 import multiprocessing as mp
 import time
 
+from SMBH.lib.SMBH_Modules import *
+
 
 #------------------------------------------------------------------------------------------------------------------
 #------------------------------------------------------------------------------------------------------------------
 #       FUNCTIONS AND VARS
 #------------------------------------------------------------------------------------------------------------------
 #------------------------------------------------------------------------------------------------------------------
+
+# Generator for the Parameter Vector. Input the numbers of the Stars, that are included in the calculation
+ParVecTemplate = [2]
+OriginParVec = PV(ParVecTemplate)
+OriginParVec.SetDynamicCenter(False)
 
 
 # Display additional info for debugging
@@ -21,1209 +27,11 @@ DEBUG_MODE = False
 fileName = "SMBH/Data/OrbitData2017.txt"
 # Output file for MCD
 outputFile = "SMBH/Data/Output.txt"
-# store last orbit data in file
-OrbitFileForewrd = "SMBH/Orbit/foreward.txt"
-OrbitFileBackwrd = "SMBH/Orbit/backward.txt"
-# Gravitational Constant in astronomy Units
-GLOB_G = 4.30091E-3
-# pc/yr to km/s conversion factor
-GLOB_PcYrKmS = 997813.106
-# mas to radians conversion factor
-GLOB_masToRad = 4.8481368110954E-9
-# 1 second to year conversion factor
-GLOB_SecToYr = 3.17098E-8
-# pc to km conversion factor
-GLOB_PcToKm = 3.086E13
-# speed of light in km/s
-GLOB_c = 299792.458
 #counter
 GLOB_counter = 0
 # Global Bounds of SGR A* Position in mas -- (del x, del y , del z)
 GLOB_SGRA_Pos = np.array([0.2, 0.2, 0.2])
 
-
-#   IMPORT AND DATA HANDLING
-
-class FitContainer():
-    '''
-    Container for all the Data needed for a Fit
-    '''
-    success = False
-    Mass = -1
-    Distance = -1
-    initR = None
-    initV = None
-    PosPath = None
-    VPath = None
-    ErrRA = None
-    ErrDE = None
-    ErrVR = None
-    OrbitNumber = 0
-    OrbElem = None
-    PositionArray = None
-    VelocityArray = None
-    
-    def __init__(self, ParVec, _oN = 1, success = True, _orb=None, _PosArr = None, _VelArr = None):
-        Pars                = ParVecToParams(ParVec)
-        self.Mass           = Pars[0]
-        self.Distance       = Pars[3]
-        self.initR          = Pars[1]
-        self.initV          = Pars[2]
-        self.OrbitNumber    = _oN # number of orbits infront of index data
-        self.success        = success
-        self.OrbElem        = _orb
-        self.PositionArray  = _PosArr
-        self.VelocityArray  = _VelArr
-
-        if type(_PosArr) == np.ndarray:
-            _tmp            = PosRealToRad(self.PositionArray, self.Distance)
-            self.PosPath    = np.array( [ _tmp[:,0], _tmp[:,1] ] )
-            self.VPath      = np.array( self.VelocityArray[:,2] )
-
-    def initErrorData(self, _RA, _DE, _VR):
-        self.ErrRA = _RA
-        self.ErrDE = _DE
-        self.ErrVR = _VR
-
-    def getChi2(self, bReduced:bool=False) -> float:
-        if type(self.ErrRA) == list:
-            lenPos = len(self.ErrRA[3])
-            lenVel = len(self.ErrVR[3])
-            NPos = lenPos / (lenPos + lenVel)
-            NVel = lenVel / (lenPos + lenVel)
-            if bReduced:
-                _t = (NPos*self.ErrRA[2] + NPos*self.ErrDE[2] + NVel*self.ErrVR[2])
-                #_t = (self.ErrRA[2] + self.ErrDE[2] + self.ErrVR[2])
-                return _t / (2*lenPos + lenVel)
-            else:
-                return (NPos*self.ErrRA[2] + NPos*self.ErrDE[2] + NVel*self.ErrVR[2])
-                #return (self.ErrRA[2] + self.ErrDE[2] + self.ErrVR[2])
-        else:
-            return 1E10
-
-    def returnParVec(self) -> list:
-        return [self.Mass, *self.initR, *self.initV, self.Distance]
-
-
-class DataContainer():
-    '''
-    Stores the Data from a Star
-    '''
-    TimeP   = None
-    TimeV   = None
-    RA      = None
-    eRA     = None
-    DE      = None
-    eDE     = None
-    VR      = None
-    eVR     = None
-
-    def __init__(self, _stNr, _SData):
-        '''
-        _stNr -- Star Number
-
-        _SData -- Star Data, already extracted from Total Data (see readTable)
-        '''
-        if _SData:
-            self.StarNr = _stNr
-            scale = np.sqrt(5)/2.60335    # for weighted
-            #scale = np.sqrt(5)/2.192    # for unweighted
-
-            #positional data
-            self.TimeP  = np.array([x["time"] for x in _SData["pos"]]   )
-            self.RA     = np.array([x["RA"] for x in _SData["pos"]]     )
-            self.DE     = np.array([x["DE"] for x in _SData["pos"]]     )
-            self.eRA    = np.array([x["e_RA"] * scale for x in _SData["pos"]]   )
-            self.eDE    = np.array([x["e_DE"] * scale for x in _SData["pos"]]   )
-
-            #RVel data
-            self.VR     = np.array([x["RVel"] for x in _SData["rad"]]   )
-            self.eVR    = np.array([x["e_RVel"] * scale for x in _SData["rad"]] )
-            self.TimeV  = np.array([x["time"] for x in _SData["rad"]]   )
-
-            #print("len of Data N = ", len(self.RA) + len(self.DE) + len(self.VR))
-
-    # create and return a copy of this object
-    def copy(self):
-        _t = DataContainer(self.StarNr, None)
-        _t.TimeP    = self.TimeP
-        _t.RA       = self.RA
-        _t.DE       = self.DE
-        _t.eRA      = self.eRA
-        _t.eDE      = self.eDE
-        _t.VR       = self.VR
-        _t.eVR      = self.eVR
-        _t.TimeV    = self.TimeV
-        return _t
-
-
-class OrbitElem():
-    def __init__(self, _a, _e, _omega, _LAN, _i, _M, _T, _nu):
-        """
-        Container for saving orbital Elements
-        Parameters
-        ----------
-        _a : semi mayor axis
-        _e : eccentricity
-        _omega : argument of periapsis
-        _LAN : longitude of ascending node
-        _i : inclination
-        _M : Mean anomaly
-        _T : Period
-        """
-        self.MayAxis = _a
-        self.Ecc = _e
-        self.ArgPeri = _omega
-        self.LAN = _LAN
-        self.Incl = _i
-        self.MeanM = _M
-        self.Period = _T
-        self.TAnom = _nu
-
-
-def readTable(_fName:str) -> tuple:
-    '''
-    reads the file. Returns (Data in rows, Header in the form [1st data, 2nd data,...])
-
-    Format:    (Data[row][point], Header[point][more info])
-    '''
-
-    _file = open(_fName, 'r')
-    _data = _file.readlines()
-    _file.close()
-
-    # this is where the header starts
-    _index = 10
-    _data_header = []
-
-
-    #------------------------------------------------
-    # read the header
-    #------------------------------------------------
-    while True:
-        if _data[_index][0] == "-":
-            break
-
-        #this is a dataline
-        _line = _data[_index]
-
-        _byte = int(_line[0:4].strip())
-        _byte_end = int(_line[5:8].strip())
-        _format = _line[9:15].strip()
-        _unit = _line[16:23].strip()
-        _label = _line[24:33].strip()
-        _desc = _line[34:].strip()
-        
-        _data_header.append([])
-        _data_header[_index - 10].append(_byte)
-        _data_header[_index - 10].append(_byte_end)
-        _data_header[_index - 10].append(_format)
-        _data_header[_index - 10].append(_unit)
-        _data_header[_index - 10].append(_label)
-        _data_header[_index - 10].append(_desc)
-
-        _index += 1
-
-    # this is where the data starts
-    _index = 134
-    _acData = []
-    
-    #------------------------------------------------
-    # read the data
-    #------------------------------------------------
-    while True:
-
-        #file end
-        if not _data[_index]:
-            break
-
-        _line = _data[_index]
-        _acData.append([])
-        for i in range(len(_data_header)):
-            _acData[_index-134].append(_line[ _data_header[i][0] - 1: _data_header[i][1] ].strip() )
-
-        if _index+1 < len(_data):
-            _index += 1
-        else:
-            break
-        
-    return (_acData, _data_header)
-
-
-def EmptyCheck(_data:list, _index:int, _indexList:list) -> bool:
-    """
-    check if any element (index given by indexList) in Data is non zero
-
-    return True if any element is non zero;    used for return_StarExistingData
-    """
-
-    for i in _indexList:
-        if ( _data[0][_index][i] != '' ):
-            return True
-    return False
-
-
-def return_StarExistingData(_data:list, StarNr:int) -> dict:
-    """
-    
-    return data for specific Star
-
-    IN: (raw_data, (int) Star Number)
-
-    OUT: StarData
-
-    FORMAT: [ Data["pos"], Data["rad"] ]
-
-    Data["pos"]..."time", "RA", "e_RA", "DE", "e_DE"
-
-    Data["rad"]..."time", "RVel", "e_RVel"
-
-    """
-
-    _header = _data[1]
-    firstStarElem = "oRA-S" + str(StarNr)
-    _index = -1
-    for i in range(len(_header)):
-        #is label the same
-        if _header[i][4] == firstStarElem:
-            _index = i
-            break
-    
-    #wrong label => wrong star number
-    if _index < 0:
-        return []
-
-    #_StarData = []
-
-    #dictionary containing positional data and radial data seperately
-    _StarData = dict( [ ("pos", []), ("rad", []) ] )
-    #form a dict from the data
-    #FORMAT:    time, RA, e_RA, DE, e_DE // RVel, e_RVel
-    for i in range(len(_data[0])):
-        #_data[0][i] is the i-th row of data; [1] is the flag position
-        #check flag; a = position
-        if (_data[0][i][1] == "a"):
-            #is the star data not empty; _index is starting index of star data
-            #check for all positional data
-            if (EmptyCheck(_data, i, [ _index, _index+1, _index+2,_index+3 ] ) ):
-                _StarData["pos"].append( dict( [ 
-                    ("time", float(_data[0][i][0])),           #date
-                    ("RA",   float(_data[0][i][_index])),      #Right ascention
-                    ("e_RA", float(_data[0][i][_index+1])),    #Error RA
-                    ("DE",   float(_data[0][i][_index+2])),    #Declination
-                    ("e_DE", float(_data[0][i][_index+3]))     #Error DE
-                     ] ) )
-
-
-        #check if rad flag
-        elif (_data[0][i][1] == "rv"):
-            if (EmptyCheck(_data, i, [_index+4,_index+5] ) ):
-                _StarData["rad"].append( dict( [
-                    ("time",    float(_data[0][i][0])),        #date
-                    ("RVel",    float(_data[0][i][_index+4])), #radial velocity
-                    ("e_RVel",  float(_data[0][i][_index+5]))  #Error RVel
-
-                ]))
-
-    return _StarData
-
-#   ORBITAL ELEMENTS
-
-def getT(r0:np.ndarray, v0:np.ndarray, _M:float) -> float:
-    '''
-    returns the Period of one orbit for given state vector and Mass
-    '''
-    _a = 1/( 2/np.linalg.norm(r0) - np.linalg.norm(v0)**2/(GLOB_G * _M) )   # a in pc
-    _t = 2*np.pi * np.sqrt( (_a**3)/(GLOB_G*_M) )                           # Units = sec * pc / km
-    return _t * GLOB_SecToYr * GLOB_PcToKm                                  # convert to year plus additional length factor
-
-
-def getOrbitalElements(_parVec:list) -> OrbitElem:
-    """
-    Returns all Orbital Elements and the Period, packed into a data class
-    Parameters
-    ----------
-    _parVec : Parameter Vector for current orbit
-    Returns
-    -------
-    OrbitalElem Object
-    """
-
-    Pars = ParVecToParams(_parVec)
-    M = Pars[0]
-    r0 = Pars[1]
-    v0 = Pars[2]
-
-    # momentum vector
-    h = np.cross(r0, v0)
-    # eccentricity vector
-    e = np.cross(v0, h) / (GLOB_G*M) - r0/np.linalg.norm(r0)
-    # eccentricity
-    e_norm = np.linalg.norm(e)
-    n = np.array( [-h[0], h[1], 0] )
-    # true anomaly
-    nu = np.arccos( np.dot(e, r0) / (e_norm * np.linalg.norm(r0)) )
-    if np.dot(r0, v0) < 0:
-        nu = 2*np.pi - nu
-    # inclination
-    i = np.arccos(h[2] / np.linalg.norm(h))
-    # eccentric Anomaly
-    E = 2* np.arctan( np.tan(nu/2) / ( np.sqrt( (1+e_norm)/(1-e_norm) ) ) )
-    # LAN
-    LAN = np.arccos( n[0] / np.linalg.norm(n) )
-    if n[1] < 0:
-        LAN = 2*np.pi - LAN
-    # argument of periapsis
-    omega = np.arccos( np.dot(n, e)/ (np.linalg.norm(n) * e_norm) )
-    if e[2] < 0:
-        omega = 2*np.pi - omega
-    # mean anomaly
-    MeanM = E - e_norm*np.sin(E)
-    # semi mayor axis
-    a = 1/( 2/np.linalg.norm(r0) - np.linalg.norm(v0)**2/(GLOB_G * M) )
-    _t = 2*np.pi * np.sqrt( (np.clip(a, 0, a)**3)/(GLOB_G*M) )   # Units = sec * pc / km
-    T = _t * GLOB_SecToYr * GLOB_PcToKm
-    
-    _OE = OrbitElem(a, e_norm, omega * 180 / np.pi, LAN * 180 / np.pi, i * 180 / np.pi, MeanM * 180 / np.pi, T, nu)
-
-    return _OE
-
-
-def OE_Essentials(_parVec:list) -> OrbitElem:
-    """
-    Only calculate e and T to be bounds checked for fit
-    Parameters
-    ----------
-    _parVec : Parameter Vector for current orbit
-    Returns
-    -------
-    OrbitalElem Object
-    """
-
-    Pars = ParVecToParams(_parVec)
-    M = Pars[0]
-    r0 = Pars[1]
-    v0 = Pars[2]
-
-    # momentum vector
-    h = np.cross(r0, v0)
-    # eccentricity vector
-    e = np.cross(v0, h) / (GLOB_G*M) - r0/np.linalg.norm(r0)
-    # eccentricity
-    e_norm = np.linalg.norm(e)
-    # semi mayor axis
-    a = 1/( 2/np.linalg.norm(r0) - np.linalg.norm(v0)**2/(GLOB_G * M) )
-    _t = 2*np.pi * np.sqrt( (np.clip(a, 0, a)**3)/(GLOB_G*M) )   # Units = sec * pc / km
-    T = _t * GLOB_SecToYr * GLOB_PcToKm
-    
-    _OE = OrbitElem(a, e_norm, 0, 0, 0, 0, T, 0)
-
-    return _OE
-
-#   UTILITY
-
-def PosRadToReal(_r:np.ndarray, _dist:float) -> np.ndarray:
-    '''
-    converts the first 2 radial elements to real distance, given the distance
-
-    returns position vector in pc
-    '''
-
-    return _r*_dist*GLOB_masToRad
-
-
-def RadToReal(_x:float, _dist:float) -> float:
-    '''
-    return distance in pc for one coordinate
-    '''
-    return _x*_dist*GLOB_masToRad
-
-
-def PosRealToRad(_r:np.ndarray, _dist:float) -> np.ndarray:
-    '''
-    converts the real position to radial position in the first 2 elements.
-    Used for plotting only
-
-    returns postion vector with units ('','',pc)
-    '''
-    _t = np.array([ _dist*GLOB_masToRad, _dist*GLOB_masToRad, 1 ])
-    return _r/_t
-
-
-def potential(r:np.ndarray,v:np.ndarray,_M:float, r_SGRA:np.ndarray=np.array([0,0,0])) -> np.ndarray:
-    """
-    return Kepler acceleration
-    Parameters
-    ----------
-    r : [vector]
-        position of particle to evaluate potential at
-    _M : [scalar]
-        Mass of central object
-
-    Returns
-    -------
-    Potential Strength
-    """
-
-    # true distance from star to srg a*
-    dist = r - r_SGRA
-
-    return -(GLOB_G*_M*dist) / (np.linalg.norm(dist)**3)
-
-
-def potentialSchwarz(r:np.ndarray,v:np.ndarray,_M:float, r_SGRA:np.ndarray=np.array([0,0,0])) -> np.ndarray:
-    """
-    return the Schwarzschild acceleration
-    Parameters
-    ----------
-    r : [vector]
-        position of particle to evaluate potential at
-    v : [vector]
-        velocity of particle
-    _M : [scalar]
-        Mass of central object
-
-    Returns
-    -------
-    Schwarzschild Potential Strength: Kepler Potential + a/r^3
-    """
-
-    h = np.cross(r,v)           # specific angular momentum
-    kepl = potential(r,v,_M)
-    Schw = (3 * GLOB_G * _M * np.dot(h,h) * r) / (GLOB_c**2 * np.linalg.norm(r)**5) 
-    return kepl + Schw
-
-
-def VerletStep(h:float,r0:np.ndarray,v0:np.ndarray,f0:np.ndarray,_M:float, r_SGRA:np.ndarray=np.array([0,0,0])) -> np.ndarray:
-    """
-    Orbital Integration using the Verlet Algorithm
-    Parameters
-    ----------
-    h : [scalar]
-        stepsize -> delta t
-    r0 : [vector]
-        position of particle from last evaluation
-    v0 : [vector]
-        velocity of particle from last evaluation
-    f0 : [scalar]
-        potential strength from last evaluation step
-    _M : [scalar]
-        Mass of central object
-    func : [function]
-        Potential function to evaluate
-
-    Returns
-    -------
-    [r1, v1, f1]
-        position, velocity and potential of new step
-    """
-    pp = np.add(v0, h/2*f0)                 # 1/2 Delta velocity
-    r1 = np.add(r0, h*pp)                   # new position = r0 + del v*del t
-    f1 = potential(r1,v0,_M, r_SGRA)                # new potential at new position
-    v1 = np.add(pp, h/2*f1)                 # new velocity = v0 + 1/2 del a0*del t + 1/2 del a1*del t
-    return np.array([r1,v1,f1])
-
-
-def VerletStepSchwarz(h:float,r0:np.ndarray,v0:np.ndarray,f0:np.ndarray,_M:float, r_SGRA:np.ndarray=np.array([0,0,0])) -> np.ndarray:
-    """
-    Orbital Integration using the Verlet Algorithm
-    Parameters
-    ----------
-    h : [scalar]
-        stepsize -> delta t
-    r0 : [vector]
-        position of particle from last evaluation
-    v0 : [vector]
-        velocity of particle from last evaluation
-    f0 : [scalar]
-        potential strength from last evaluation step
-    _M : [scalar]
-        Mass of central object
-    func : [function]
-        Potential function to evaluate
-
-    Returns
-    -------
-    [r1, v1, f1]
-        position, velocity and potential of new step
-    """
-    pp = np.add(v0, h/2*f0)                 # 1/2 Delta velocity
-    r1 = np.add(r0, h*pp)                   # new position = r0 + del v*del t
-    f1 = potentialSchwarz(r1,pp,_M)             # new potential at new position
-    v1 = np.add(pp, h/2*f1)                 # new velocity = v0 + 1/2 del a0*del t + 1/2 del a1*del t
-    return np.array([r1,v1,f1])
-
-
-def returnDataError(rData:np.ndarray, rDataErr:np.ndarray, rTime:np.ndarray, Fake:np.ndarray, fTimeEnd:float) -> list:
-    """
-    evaluates how much fake deviates from data
-
-    data and fake must begin at the same point, for this to work
-    Parameters
-    ----------
-    rData : np.ndarray
-        real Data to compare Fake Data against
-    rDataErr : np.ndarray
-        Error for real Data, used in chi calculation
-    rTime : np.ndarray
-        Timestamps for all real Data points
-    Fake : np.ndarray
-        Fake Data points that will be compared to real Data
-    fTimeEnd : float
-        Total End Time of Fake Data, this function will create its own time array based on this value
-
-    Returns
-    -------
-    [ x_time, y_UsedData, chi^2 value]
-    """
-
-    # create timing for fake data
-    fakeTimeline = np.linspace(0,fTimeEnd, len(Fake))
-
-    newTimeOfFake   = np.empty(len(rTime))
-    newValues       = np.empty(len(rTime))
-    j = 0
-
-    # determine closest fakeTime for every measured timestamp
-    # if fake orbit shorter than measured time => last measured points get ignored
-    # if fake orbit longer than measured time => last fake points get ignored
-    for i in range(len(rTime)):
-        for k in range(j, len(fakeTimeline)):
-            if (fakeTimeline[k] >= rTime[i]):
-                newTimeOfFake[i] = fakeTimeline[k]
-                newValues[i] = Fake[k]
-                j = k
-                break
-
-    chi2 = ((rData - newValues)/rDataErr)**2
-    
-    return [newTimeOfFake, newValues, np.sum( chi2 ), chi2]
-
-
-def returnCombinedError(StarData:DataContainer, FitData:FitContainer, _in, redshiftCorr:bool = False) -> float:
-    """
-    combines all measurement errors
-    Parameters
-    ----------
-    StarData : DataContainer
-        The Star Data
-    FitData : FitContainer
-        The Fit Data, prior to any Error Calculation, Error will be overwritten
-    _in : [_index_R, _index_V]
-        Index point of starting data
-    redshiftCorr : bool
-        use redshift correction in error calculation? Only for Schwarzschild potential
-
-    Returns
-    -------
-    chi^2 value for current parameters
-    """
-    
-    if FitData.success:
-        # create timing for fake data
-        _eT = StarData.TimeP[_in[0]] - StarData.TimeP[0] + FitData.OrbitNumber * FitData.OrbElem.Period
-
-        # error on every measurement
-        Err_RA = returnDataError(StarData.RA, StarData.eRA, StarData.TimeP - StarData.TimeP[0], FitData.PosPath[0], _eT)
-        Err_DE = returnDataError(StarData.DE, StarData.eDE, StarData.TimeP - StarData.TimeP[0], FitData.PosPath[1], _eT)
-        
-        # rad vel points need to be shifted by the same amount as the position data for consistency
-        if redshiftCorr:
-            
-            fakeTimeline = np.linspace(0,_eT, len(FitData.VPath))
-            j = 0
-            rTime = StarData.TimeV - StarData.TimeP[0]
-
-            #newVR_Timeline = np.empty(len(rTime))
-            LengthAtVR = np.empty(len(rTime))
-            newFakeVR = np.empty(len(rTime))
-
-            for i in range(len(rTime)):
-                for k in range(j, len(fakeTimeline)):
-                    if (fakeTimeline[k] >= rTime[i]):
-                        #newVR_Timeline[i] = fakeTimeline[k]
-                        LengthAtVR[i] = np.linalg.norm(FitData.PositionArray[k]) #FitData.PositionArray[k][2] #
-                        newFakeVR[i] = FitData.VPath[k]
-                        j = k
-                        break
-
-
-            PN_VR = StarData.VR - getGravRedshift(FitData.Mass, LengthAtVR)
-            _chi2 = ((PN_VR - newFakeVR)/StarData.eVR)**2
-            Err_Vz = [StarData.TimeV - StarData.TimeP[0], PN_VR, np.sum( _chi2 ), _chi2]
-
-        else:
-            Err_Vz = returnDataError(StarData.VR, StarData.eVR, StarData.TimeV - StarData.TimeP[0], FitData.VPath, _eT)
-
-
-        lenPos = len(StarData.RA)
-        lenVel = len(StarData.VR)
-        NPos = lenPos / (lenPos + lenVel)
-        NVel = lenVel / (lenPos + lenVel)
-        
-        #print("len: ", len(Err_RA[3]) + len(Err_DE[3]) + len(Err_Vz[3]))
-        FitData.initErrorData(Err_RA, Err_DE, Err_Vz)   # save individual errors in FitData
-
-        # chi^2 value
-        #chi2 = (Err_RA[2] + Err_DE[2] + Err_Vz[2])
-        chi2 = (NPos * Err_RA[2] + NPos * Err_DE[2] + NVel * Err_Vz[2])
-        #Nlen = len(Err_RA[3]) + len(Err_DE[3]) + len(Err_Vz[3])
-
-        #chi2 = chi2/Nlen
-
-        return chi2
-    
-    else:
-        return 1E10
-
-
-def returnCombinedErrorFromFile(SD:DataContainer, FitData:FitContainer, _in) -> float:
-    
-    _OFile = open(OrbitFileForewrd, 'r')
-    _line = _OFile.readline()
-
-    NumberLines = -2
-    StartBackwards = -1
-
-    while _line:
-        NumberLines += 1
-        if _line[0] == '#' and NumberLines > 0:
-            StartBackwards = NumberLines
-        _line = _OFile.readline()
-
-    _OFile.close()
-    _OFile = open(OrbitFileForewrd, 'r')
-    _line = _OFile.readline()
-
-    chi2RA = 0
-    chi2DE = 0
-    chi2VR = 0
-    fCount = -1
-
-    PositionRealTime = SD.TimeP - SD.TimeP[0]
-    VelocityRealTime = SD.TimeV - SD.TimeP[0]
-    # end of time
-    _eT = SD.TimeP[_in[0]] - SD.TimeP[0] + FitData.OrbitNumber * FitData.OrbElem.Period
-    # time from index point to ent of time
-    fakeTimeline = np.linspace(SD.TimeP[_in[0]] - SD.TimeP[0], _eT, StartBackwards - 1)
-
-    fakeTimelineBack = np.linspace(0, SD.TimeP[_in[0]] - SD.TimeP[0], NumberLines - StartBackwards)
-    fakeTimelineBack = np.flip(fakeTimelineBack)
-
-    rUsedF = []
-    vUsedF = []
-
-    RAIndex = 0
-    VRIndex = 0
-    count = 1
-
-    # forward
-    while _line:
-        if count > StartBackwards:
-            break
-        count += 1
-        _t = _line.strip()
-        _line = _OFile.readline()
-        if _t[0] != '#':
-            _t = _t.split(" ")
-            _t = [float(x) for x in _t]
-            r = np.array(_t[:3])
-            v = np.array(_t[3:])
-
-            if fakeTimeline[count-1] >= PositionRealTime[RAIndex]:
-                rUsedF.append(r)
-                RAIndex = count - 1
-            
-            if fakeTimeline[count - 1] >= VelocityRealTime[VRIndex]:
-                vUsedF.append(v)
-                VRIndex = count - 1
-
-
-    _OFile.close()
-    _OFile = open(OrbitFileForewrd, 'r')
-    _line = _OFile.readline()
-    count = 1
-    rUsedB = []
-    vUsedB = []
-
-    while _line:
-        if count < StartBackwards:
-            _line = _OFile.readline()
-        else:
-            _t = _line.strip()
-            _line = _OFile.readline()
-            _t = _t.split(" ")
-            _t = [float(x) for x in _t]
-            r = np.array(_t[:3])
-            v = np.array(_t[3:])
-
-            if fakeTimeline[count-1] >= PositionRealTime[RAIndex]:
-                rUsedB.append(r)
-                RAIndex = count - 1
-            
-            if fakeTimeline[count - 1] >= VelocityRealTime[VRIndex]:
-                vUsedB.append(v)
-                VRIndex = count - 1
-
-
-    if FitData.success:
-        # create timing for fake data
-        _eT = SD.TimeP[_in[0]] - SD.TimeP[0] + FitData.OrbitNumber * FitData.OrbElem.Period
-
-        # error on every measurement
-        Err_RA = returnDataError(SD.RA, SD.eRA, SD.TimeP - SD.TimeP[0], FitData.PosPath[0], _eT)
-        Err_DE = returnDataError(SD.DE, SD.eDE, SD.TimeP - SD.TimeP[0], FitData.PosPath[1], _eT)
-        
-        Err_Vz = returnDataError(SD.VR, SD.eVR, SD.TimeV - SD.TimeP[0], FitData.VPath, _eT)
-
-        FitData.initErrorData(Err_RA, Err_DE, Err_Vz)   # save individual errors in FitData
-
-        # chi^2 value
-        chi2 = (Err_RA[2] + Err_DE[2] + Err_Vz[2])
-
-        return chi2
-    
-    else:
-        return 1E10
-
-
-def returnSpecificChi2Point(SD:DataContainer, ParVec:list, _in:list, kwargs:dict={}) -> float:
-    
-    OrbEl = getOrbitalElements(ParVec)
-    NewFitData = getOrbit(SD=SD, Orb=OrbEl, ParamVec=ParVec, index=_in[0], max_iter=10E6, stepsize=kwargs['Stepsize'], kwargs=kwargs)
-    x = returnCombinedError(SD, NewFitData, _in, kwargs['grav-red'])
-
-    return x
-
-
-def ParVecToParams(_list:list) -> list:
-    """
-    Returns parameter list for use in orbit parsing
-    Parameters
-    ----------
-    _list : ParVec
-    Returns
-    -------
-    [Mass, R vec, V vec, Distance]
-    """
-    _M = _list[0]
-    _r = np.array( [_list[1], _list[2], _list[3]] )
-    _v = np.array( [_list[4], _list[5], _list[6]] )
-    _d = _list[7]
-    return [_M, _r, _v, _d]
-
-
-def generateMCData(OldData:np.ndarray, Error:np.ndarray) -> np.ndarray:
-    """
-    Generate a new set of points given the old data and the error bars.
-    All points are within 1 sigma scaled with error
-    Parameters
-    ----------
-    OldData : list
-        Data points in given Coorinate
-    Error : list
-        coresponding errors
-
-    Returns
-    -------
-    list
-        new set of datapoints (of same length)
-    """
-    
-    sig = np.random.normal(0,1,len(OldData))
-    newData = OldData + sig * Error
-    return newData
-
-
-def ProgressBar(count:int, total:int, status:str=''):
-    '''
-    a simple progressbar to keep output clean
-    '''
-    barLen = 60
-    fillLen = int(round(barLen*count/float(total)))
-    percent = round(100*count/float(total),1)
-    bar = '='*fillLen + '-'*(barLen-fillLen)
-
-    sys.stdout.write('[%s] %s%s (%s) ... %s\r' % (bar, percent, '%', count, status))
-    sys.stdout.flush()
-
-
-def NoProgressBar(count:int, status:str=''):
-    '''
-    Display clean Message without progressbar
-    '''
-    sys.stdout.write('(%s) ... %s\r' % (count, status))
-    sys.stdout.flush()
-
-
-def getGravRedshift(M:float, r:np.ndarray) -> np.ndarray:
-    """
-    returns the velocity change due to gravitational redshift
-    Parameters
-    ----------
-    M : float
-        Mass of Black hole
-    r : np.ndarray
-        current position of star
-
-    Returns
-    -------
-    Delta RVel : float
-        radialvelocity correction
-    """
-    # Schwarzschild radius
-    rs = 2 * GLOB_G * M / GLOB_c**2
-    # redshift
-    z = ( 1 / np.sqrt( 1 - rs/r ) ) - 1
-    return GLOB_c * z
-
-# PLOT FUNCTIONS
-
-def plot4Ways(_fig, SD:DataContainer, FD:FitContainer = None, _in:list = [-1,-1], _fName:str = None):
-    """
-    plot 4 diagrams showing position and time dependency of data, plus FitData, if available
-    Parameters
-    ----------
-    SD : DataContainer
-        StarData
-    FD : FitContainer
-        FitData, can be None
-    _fig : Reference to main Figure
-    _fName : str, optional
-        save plot as file, by default "frame0001"
-    showGraph : bool, optional
-        Show Figure, by default True
-    _in: [_index_R, _index_V]
-        if set, draw a point around the Index point
-    """
-    showFit = True
-    if not FD:
-        showFit = False
-
-    #-------------------------------------------------------------
-    # CONFIG
-    StarColor = 'black'
-    StarErr = 'blue'
-    _ms=3                   # marker size
-    chi2Color = 'tab:orange'
-
-    _fig.clf()
-    F = []
-
-    for i in range(4):
-        _tf = _fig.add_subplot(2,2,i+1)
-        _tf.set_axisbelow(True)
-        _tf.grid(True)
-        plt.xticks(fontsize=12)
-        plt.yticks(fontsize=12)
-        F.append(_tf)
-
-    F[0].set_aspect('equal', 'box')
-    plt.subplots_adjust(left=0.1, right=0.9, top=0.9, bottom=0.1)
-    #-------------------------------------------------------------
-    #x-y
-    F[0].set_xlabel(r'RA [mas]', {'size':14})
-    F[0].set_ylabel(r'DE [mas]', {'size':14})
-    #vR-time
-    F[1].set_xlabel(r'time - ' + str(SD.TimeP[0]) + ' [yr]', {'size':14})
-    F[1].set_ylabel(r'RVel [km/s]', {'size':14})
-    #x-time (RA)
-    F[2].set_xlabel(r'time - ' + str(SD.TimeP[0]) + ' [yr]', {'size':14})
-    F[2].set_ylabel(r'RA [mas]', {'size':14})
-    #y-time (DE)
-    F[3].set_xlabel(r'time - ' + str(SD.TimeP[0]) + ' [yr]', {'size':14})
-    F[3].set_ylabel(r'DE [mas]', {'size':14})
-
-    #-------------------------------------------------------------
-    #Real Data
-    #center
-    F[0].scatter(0,0,c="red", marker='+', label='center', s=50)
-    #position x-y
-    F[0].errorbar(SD.RA, SD.DE, xerr=SD.eRA, yerr=SD.eDE, fmt='o', ecolor=StarErr, color=StarColor, label='S'+str(SD.StarNr) + ' Orbit', ms=_ms)
-    #vR-time
-    F[1].errorbar(SD.TimeV - SD.TimeP[0], SD.VR, yerr=SD.eVR, fmt='o', ecolor=StarErr, color=StarColor, label='S'+str(SD.StarNr) +' RVel', ms=_ms, zorder=2)
-    #x-time
-    F[2].errorbar(SD.TimeP - SD.TimeP[0], SD.RA, yerr=SD.eRA, fmt='o', ecolor=StarErr, color=StarColor, label='S'+str(SD.StarNr) + ' RA',ms=_ms, zorder=2)
-    #y-time
-    F[3].errorbar(SD.TimeP - SD.TimeP[0], SD.DE, yerr=SD.eDE, fmt='o', ecolor=StarErr, color=StarColor, label='S'+str(SD.StarNr) + ' DE',ms=_ms, zorder=2)
-
-    #-------------------------------------------------------------
-    #fake Data
-    if showFit:
-
-        # This is the length of the fake data. From Index point it extends some integer amount orbit to front
-        # and backwards it extends to 0, because of float orbit number for back direction
-        # subtract first time measure for relative data
-        DataLenFromIndex = SD.TimeP[_in[0]] - SD.TimeP[0] + FD.OrbitNumber * FD.OrbElem.Period
-        fake_time = np.linspace(0,DataLenFromIndex, len(FD.PosPath[0]))
-        # end of real data, in relative units
-        END_Data = SD.TimeP[-1] - SD.TimeP[0]
-        # update time to only display relevant data
-        fake_time = [x for x in fake_time if x < END_Data]
-        #length of relevant data, used for truncating fake data
-        FI = len(fake_time)
-        # init points used for chi^2 and remove duplicates
-        # 0 - time; 1 - values
-        chi2RA = FD.ErrRA
-        chi2DE = FD.ErrDE
-        chi2RVel = FD.ErrVR
-
-        SimRA = [x for x in FD.PosPath[0][:FI] if x not in chi2RA[1]]
-        SimRA_Time = [x for x in fake_time if x not in chi2RA[0]]
-        SimDE = [x for x in FD.PosPath[1][:FI] if x not in chi2DE[1]]
-        SimDE_Time = [x for x in fake_time if x not in chi2DE[0]]
-        SimRV = [x for x in FD.VPath[:FI] if x not in chi2RVel[1]]
-        SimRV_Time = [x for x in fake_time if x not in chi2RVel[0]]
-
-        #------------------------------------------------------------- 
-        # Simulation data points
-        #position x-y
-        F[0].plot(FD.PosPath[0], FD.PosPath[1], c='tab:blue', label='Fit')
-        #vR-time
-        F[1].plot(fake_time, FD.VPath[:FI], label='sim RVel', zorder=1)
-        #x-time
-        F[2].plot(SimRA_Time, SimRA, label='sim RA', zorder=1)
-        #y-time
-        F[3].plot(SimDE_Time, SimDE, label='sim DE', zorder=1)
-        #------------------------------------------------------------- 
-        # simulation points used in chi^2
-        #F[1].scatter(FD.ErrVR[0], FD.ErrVR[1], label=r'$\chi^2$ points', c=chi2Color, s=_ms, zorder=3) #vR - vz
-        #F[2].scatter(FD.ErrRA[0], FD.ErrRA[1], label=r'$\chi^2$ points', c=chi2Color, s=_ms, zorder=3) #RA - x
-        #F[3].scatter(FD.ErrDE[0], FD.ErrDE[1], label=r'$\chi^2$ points', c=chi2Color, s=_ms, zorder=3) #DE - y
-        #------------------------------------------------------------- 
-        # draw index point
-        if (_in[0] > 0 and _in[1] > 0):
-            F[1].scatter(SD.TimeV[_in[1]] - SD.TimeP[0], SD.VR[_in[1]], label=r'Index', s=20, color='red', zorder=99) #vR - vz
-            F[2].scatter(SD.TimeP[_in[0]] - SD.TimeP[0], SD.RA[_in[0]], label=r'Index', s=20, color='red', zorder=99) #RA - x
-            F[3].scatter(SD.TimeP[_in[0]] - SD.TimeP[0], SD.DE[_in[0]], label=r'Index', s=20, color='red', zorder=99) #DE - y
-        #-------------------------------------------------------------
-
-        # Print Orbit Elements left of screen
-        OrbElem = FD.OrbElem
-        RoundTo = 3
-        # Mass
-        plt.figtext(0.01,0.7, r"M [$10^6 M_\odot$] =" + str( np.round(FD.Mass/1E6, RoundTo) ) )
-        print("M = ", FD.Mass/1E6)
-        # Distance
-        plt.figtext(0.01,0.65, "R [kpc] =" + str( np.round(FD.Distance/1E3, RoundTo) ) )
-        print("D = ", FD.Distance/1E3)
-        # Period
-        plt.figtext(0.01,0.6, "T [yr] =" + str( np.round(OrbElem.Period, RoundTo) ) )
-        print("T = ", OrbElem.Period)
-        # Eccentricity
-        plt.figtext(0.01,0.55, "e [1] =" + str( np.round(OrbElem.Ecc, RoundTo) ) )
-        print("e = ", OrbElem.Ecc)
-        # Semi Mayor Axis
-        plt.figtext(0.01,0.45, "a [pc] =" + str( np.round(OrbElem.MayAxis, RoundTo) ) )
-        print("a = ", OrbElem.MayAxis)
-        # Inclination
-        plt.figtext(0.01,0.4, r"i [$^\circ$] =" + str( np.round(OrbElem.Incl, RoundTo) ) )
-        print("i = ", OrbElem.Incl)
-        # Longitude of ascending node
-        plt.figtext(0.01,0.35, r"$\Omega$ [$^\circ$] =" + str( np.round(OrbElem.LAN, RoundTo) ) )
-        print("LAN = ", OrbElem.LAN)
-        # argument of periapsis
-        plt.figtext(0.01,0.3, r"$\omega$ [$^\circ$] =" + str( np.round(OrbElem.ArgPeri, RoundTo) ) )
-        print("omega = ", OrbElem.ArgPeri)
-
-    for i in range(len(F)):
-        F[i].legend(loc='best', fontsize=12)
-    
-    if _fName:
-        plt.savefig("SMBH/Data/dump/" + _fName)
-
-
-def plot2Ways(_fig, SD:DataContainer, FD:FitContainer = None, _in:list = [-1,-1], _fName:str = None):
-    """
-    plot 2 diagrams showing position and Radial Velocity over Time
-    Parameters
-    ----------
-    SD : DataContainer
-        StarData
-    FD : FitContainer
-        FitData, can be None
-    _fig : Reference to main Figure
-    _fName : str, optional
-        save plot as file, by default "frame0001"
-    showGraph : bool, optional
-        Show Figure, by default True
-    _in: [_index_R, _index_V]
-        if set, draw a point around the Index point
-    """
-    showFit = True
-    if not FD:
-        showFit = False
-
-    #-------------------------------------------------------------
-    # CONFIG
-    StarColor = 'black'
-    StarErr = 'gray'
-    _ms=3                   # marker size
-    chi2Color = 'tab:orange'
-
-    _fig.clf()
-    F = []
-
-    for i in range(2):
-        _tf = _fig.add_subplot(1,2,i+1)
-        _tf.set_axisbelow(True)
-        _tf.grid(True)
-        plt.xticks(fontsize=12)
-        plt.yticks(fontsize=12)
-        F.append(_tf)
-
-    F[0].set_aspect('equal', 'box')
-    #-------------------------------------------------------------
-    #x-y
-    F[0].set_xlabel(r'RA [mas]', {'size':14})
-    F[0].set_ylabel(r'DE [mas]', {'size':14})
-    #vR-time
-    F[1].set_xlabel(r'time - ' + str(SD.TimeP[0]) + ' [yr]', {'size':14})
-    F[1].set_ylabel(r'RVel [km/s]', {'size':14})
-    #-------------------------------------------------------------
-    #Real Data
-    #center
-    F[0].scatter(0,0,c="red", marker='+', label='center', s=50)
-    #position x-y
-    F[0].errorbar(SD.RA, SD.DE, xerr=SD.eRA, yerr=SD.eDE, fmt='o', ecolor=StarErr, color=StarColor, label='S'+str(SD.StarNr) + ' Orbit', ms=_ms)
-    #vR-time
-    F[1].errorbar(SD.TimeV - SD.TimeP[0], SD.VR, yerr=SD.eVR, fmt='o', ecolor=StarErr, color=StarColor, label='S'+str(SD.StarNr) +' RVel', ms=_ms, zorder=2)
-    #-------------------------------------------------------------
-    #fake Data
-    if showFit:
-
-        # This is the length of the fake data. From Index point it extends some integer amount orbit to front
-        # and backwards it extends to 0, because of float orbit number for back direction
-        # subtract first time measure for relative data
-        DataLenFromIndex = SD.TimeP[_in[0]] - SD.TimeP[0] + FD.OrbitNumber * FD.OrbElem.Period
-        fake_time = np.linspace(0,DataLenFromIndex, len(FD.PosPath[0]))
-        # end of real data, in relative units
-        END_Data = SD.TimeP[-1] - SD.TimeP[0]
-        # update time to only display relevant data
-        fake_time = [x for x in fake_time if x < END_Data]
-        #length of relevant data, used for truncating fake data
-        FI = len(fake_time)
-        # init points used for chi^2 and remove duplicates
-        # 0 - time; 1 - values
-        chi2RVel = FD.ErrVR
-
-        SimRV = [x for x in FD.VPath[:FI] if x not in chi2RVel[1]]
-        SimRV_Time = [x for x in fake_time if x not in chi2RVel[0]]
-
-
-        #------------------------------------------------------------- 
-        # Simulation data points
-        #position x-y
-        F[0].plot(FD.PosPath[0], FD.PosPath[1], c='tab:blue', label='Fit')
-        #vR-time
-        F[1].plot(fake_time, FD.VPath[:FI], label='sim RVel', zorder=1)
-        #------------------------------------------------------------- 
-        # simulation points used in chi^2
-        #F[1].scatter(FD.ErrVR[0], FD.ErrVR[1], label=r'$\chi^2$ points', c=chi2Color, s=_ms, zorder=3) #vR - vz
-        #------------------------------------------------------------- 
-        # draw index point
-        if (_in[0] > 0 and _in[1] > 0):
-            F[1].scatter(SD.TimeV[_in[1]] - SD.TimeP[0], SD.VR[_in[1]], label=r'Index', s=20, color='red', zorder=99) #vR - vz
-        #-------------------------------------------------------------
-
-        # Print Orbit Elements left of screen
-        OrbElem = FD.OrbElem
-        RoundTo = 3
-        # Mass
-        plt.figtext(0.01,0.7, r"M [$10^6 M_\odot$] =" + str( np.round(FD.Mass/1E6, RoundTo) ), {'size':16} )
-        print("M = ", FD.Mass/1E6)
-        # Distance
-        plt.figtext(0.01,0.65, "R [kpc] =" + str( np.round(FD.Distance/1E3, RoundTo) ), {'size':16} )
-        print("D = ", FD.Distance/1E3)
-        # Period
-        plt.figtext(0.01,0.6, "T [yr] =" + str( np.round(OrbElem.Period, RoundTo) ), {'size':16} )
-        print("T = ", OrbElem.Period)
-        # Eccentricity
-        plt.figtext(0.01,0.55, "e [1] =" + str( np.round(OrbElem.Ecc, RoundTo) ), {'size':16} )
-        print("e = ", OrbElem.Ecc)
-        # Semi Mayor Axis
-        plt.figtext(0.01,0.45, "a [pc] =" + str( np.round(OrbElem.MayAxis, RoundTo) ), {'size':16} )
-        print("a = ", OrbElem.MayAxis)
-        # Inclination
-        plt.figtext(0.01,0.4, r"i [$^\circ$] =" + str( np.round(OrbElem.Incl, RoundTo) ), {'size':16} )
-        print("i = ", OrbElem.Incl)
-        # Longitude of ascending node
-        plt.figtext(0.01,0.35, r"$\Omega$ [$^\circ$] =" + str( np.round(OrbElem.LAN, RoundTo) ), {'size':16} )
-        print("LAN = ", OrbElem.LAN)
-        # argument of periapsis
-        plt.figtext(0.01,0.3, r"$\omega$ [$^\circ$] =" + str( np.round(OrbElem.ArgPeri, RoundTo) ), {'size':16} )
-        print("omega = ", OrbElem.ArgPeri)
-
-    for i in range(len(F)):
-        F[i].legend(loc='best', fontsize=12)
-    
-    if _fName:
-        plt.savefig("SMBH/Data/dump/" + _fName)
-
-
-def plotDataAndFit(_fig, SD:DataContainer, FD:FitContainer, _fName:str = None):
-    '''
-    plots only the Positions of the Star with the Fit
-    '''
-
-    #-------------------------------------------------------------
-    # CONFIG
-    StarColor = 'black'
-    StarErr = 'gray'
-    _ms=3                   # marker size
-
-    _fig.clf()
-    _tf = _fig.add_subplot(1,1,1)
-    _tf.set_aspect('equal', 'box')
-    _tf.set_axisbelow(True)
-    _tf.grid(True)
-    plt.xticks(fontsize=12)
-    plt.yticks(fontsize=12)
-
-    _tf.set_xlabel(r'RA [mas]', {'size':14})
-    _tf.set_ylabel(r'DE [mas]', {'size':14})
-
-    #-------------------------------------------------------------
-    # center
-    _tf.scatter(0,0,c="red", marker='+', label='center', s=50)
-    # actual data
-    _tf.errorbar(SD.RA, SD.DE, xerr=SD.eRA, yerr=SD.eDE, fmt='o', ecolor=StarErr, color=StarColor, label='S'+str(SD.StarNr) + ' Orbit', ms=_ms)
-    # fake data
-    _tf.plot(FD.PosPath[0], FD.PosPath[1], c='tab:blue', label='Fit')
-    #-------------------------------------------------------------
-
-    OrbElem = FD.OrbElem
-    RoundTo = 3
-    # Mass
-    plt.figtext(0.01,0.7, r"M [$10^6 M_\odot$] =" + str( np.round(FD.Mass/1E6, RoundTo) ), {'size':16})
-    print("M = ", FD.Mass/1E6)
-    # Distance
-    plt.figtext(0.01,0.65, "D [kpc] =" + str( np.round(FD.Distance/1E3, RoundTo) ), {'size':16} )
-    print("R = ", FD.Distance/1E3)
-    # Period
-    plt.figtext(0.01,0.6, "T [yr] =" + str( np.round(OrbElem.Period, RoundTo) ), {'size':16} )
-    print("T = ", OrbElem.Period)
-    # Eccentricity
-    plt.figtext(0.01,0.55, "e [1] =" + str( np.round(OrbElem.Ecc, RoundTo) ), {'size':16} )
-    print("e = ", OrbElem.Ecc)
-    # Semi Mayor Axis
-    plt.figtext(0.01,0.45, "a [pc] =" + str( np.round(OrbElem.MayAxis, RoundTo) ), {'size':16} )
-    print("a = ", OrbElem.MayAxis)
-    # Inclination
-    plt.figtext(0.01,0.4, r"i [$^\circ$] =" + str( np.round(OrbElem.Incl, RoundTo) ), {'size':16} )
-    print("i = ", OrbElem.Incl)
-    # Longitude of ascending node
-    plt.figtext(0.01,0.35, r"$\Omega$ [$^\circ$] =" + str( np.round(OrbElem.LAN, RoundTo) ), {'size':16} )
-    print("LAN = ", OrbElem.LAN)
-    # argument of periapsis
-    plt.figtext(0.01,0.3, r"$\omega$ [$^\circ$] =" + str( np.round(OrbElem.ArgPeri, RoundTo) ), {'size':16} )
-    print("omega = ", OrbElem.ArgPeri)
-
-    _tf.legend(loc='best', fontsize=12)
-
-    if _fName:
-        plt.savefig("SMBH/Data/dump/" + _fName)
-      
 
 #------------------------------------------------------------------------------------------------------------------
 #------------------------------------------------------------------------------------------------------------------
@@ -1231,7 +39,7 @@ def plotDataAndFit(_fig, SD:DataContainer, FD:FitContainer, _fName:str = None):
 #------------------------------------------------------------------------------------------------------------------
 #------------------------------------------------------------------------------------------------------------------
 
-def getOrbit(SD:DataContainer, Orb:OrbitElem, ParamVec:list, index:int, max_iter:float, stepsize:float, kwargs:dict={}) -> FitContainer:
+def getOrbit(SD:StarContainer, Orb:OrbitElem, ParamVec:list, index:int, max_iter:float, stepsize:float, kwargs:dict={}) -> FitContainer:
     """
     Calculates the orbit for given parameters
     Parameters
@@ -1327,20 +135,12 @@ def getOrbit(SD:DataContainer, Orb:OrbitElem, ParamVec:list, index:int, max_iter
     PosTrackerBack = []
     VelTracker = [_v]
     VelTrackerBack = []
-
-    if 'useFile' in kwargs.keys():
-        useExtFile = kwargs['useFile']
-    else:
-        useExtFile = False
-    
-    if useExtFile:
-        _OFile = open(OrbitFileForewrd, "w")
     
 
     #------------------------------------------------------------------------
     #   ORBIT INTEGRATION
 
-    # Integrate from Index Point to End point, forward time
+    # Integrate from Index Point to End point, forward in time
     while cur_timer < cutoff_timer:
         
         cur_timer += 1
@@ -1354,11 +154,8 @@ def getOrbit(SD:DataContainer, Orb:OrbitElem, ParamVec:list, index:int, max_iter
         f_cur = _dat[2]
         #position in radial space
 
-        if useExtFile:
-            _OFile.write(str(r_cur[0]) + " " + str(r_cur[1]) + " " + str(r_cur[2]) + " " + str(v_cur[0]) + " " + str(v_cur[1]) + " " + str(v_cur[2]) + "\n")
-        else:
-            PosTracker.append(r_cur)
-            VelTracker.append(v_cur)
+        PosTracker.append(r_cur)
+        VelTracker.append(v_cur)
 
         # determine end of orbit integration
         if (not stopDotProd):
@@ -1384,18 +181,15 @@ def getOrbit(SD:DataContainer, Orb:OrbitElem, ParamVec:list, index:int, max_iter
                     if DEBUG_MODE:
                         print("forward cutoff = ", cutoff_timer)
 
-
+    print(cur_timer)
     # reset some data
     cur_timer = 0
     r_cur = _r
     v_cur = _v            
     f_cur = PotFunc(_r,_v,_M)
 
-    if useExtFile:
-        _OFile.close()
-        _OFile = open(OrbitFileBackwrd, "w")
 
-    # Integrate multiple orbits backwards depending on data beginning
+    # Integrate multiple orbits backwards in time depending on data beginning
     while cur_timer < np.ceil(OneOrbitSteps * QuotientBack) :
         
         cur_timer += 1
@@ -1408,29 +202,25 @@ def getOrbit(SD:DataContainer, Orb:OrbitElem, ParamVec:list, index:int, max_iter
         #new potential for next step
         f_cur = _dat[2]
 
-        if useExtFile:
-            _OFile.write(str(r_cur[0]) + " " + str(r_cur[1]) + " " + str(r_cur[2]) + " " + str(v_cur[0]) + " " + str(v_cur[1]) + " " + str(v_cur[2]) + "\n")
-        else:
-            PosTrackerBack.append(r_cur)
-            VelTrackerBack.append(v_cur)
 
+        PosTrackerBack.append(r_cur)
+        VelTrackerBack.append(v_cur)
 
-    if useExtFile:
-        _OFile.close()
 
     if DEBUG_MODE:
         print("backward cutoff = ", cur_timer)
 
+    print(cur_timer)
+
     #------------------------------------------------------------------------
     #   CONCAT DATA
 
-    if not useExtFile:
-        # reverse backward time points
-        PosTrackerBack.reverse()
-        VelTrackerBack.reverse()
-        # append data
-        PosTracker = np.array(PosTrackerBack + PosTracker)
-        VelTracker = np.array(VelTrackerBack + VelTracker)
+    # reverse backward time points
+    PosTrackerBack.reverse()
+    VelTrackerBack.reverse()
+    # append data
+    PosTracker = np.array(PosTrackerBack + PosTracker)
+    VelTracker = np.array(VelTrackerBack + VelTracker)
 
 
     #------------------------------------------------------------------------
@@ -1440,7 +230,7 @@ def getOrbit(SD:DataContainer, Orb:OrbitElem, ParamVec:list, index:int, max_iter
     return FD
 
 
-def FitDataInner(SD:DataContainer, kwargs:dict={}) -> Tuple[FitContainer, list]:
+def FitDataInner(SD:StarContainer, kwargs:dict={}) -> Tuple[FitContainer, list]:
     """
     Inner Routine for fitting the orbit of a specified star.
     Only needs the Star Data Object to work.
@@ -1673,7 +463,7 @@ def FitDataInner(SD:DataContainer, kwargs:dict={}) -> Tuple[FitContainer, list]:
     return NewFitData, [_index_R, _index_V]
 
 
-def FitDataStandalone(_starNr:int, kwargs:dict={}) -> Tuple[FitContainer, DataContainer, list]:
+def FitDataStandalone(_starNr:int, kwargs:dict={}) -> Tuple[FitContainer, StarContainer, list]:
     """
     Standalone Routine for fitting the orbit of a specified star.
     can display plot, intended for fitting and plotting from beginning
@@ -1694,7 +484,7 @@ def FitDataStandalone(_starNr:int, kwargs:dict={}) -> Tuple[FitContainer, DataCo
     #return Data for Star S-NUMBER
     S_Data = return_StarExistingData(Data, _starNr)
     #Star Data Container
-    SD = DataContainer(_starNr, S_Data)
+    SD = StarContainer(_starNr, S_Data)
 
     FD, selIndex = FitDataInner(SD, kwargs=kwargs)
 
@@ -1724,7 +514,7 @@ def FitDataStandalone(_starNr:int, kwargs:dict={}) -> Tuple[FitContainer, DataCo
     return FD, SD, selIndex
 
 
-def genMCD(SD:DataContainer, iter:int, kwargs:dict={}):
+def genMCD(SD:StarContainer, iter:int, kwargs:dict={}):
     """
     Calculates new Parameters after variating Star Data adn writes them to file
     Parameters
@@ -1796,7 +586,7 @@ def genMCD(SD:DataContainer, iter:int, kwargs:dict={}):
     print("\nDone!\n")
 
 
-def genMCD_MP(SD:DataContainer, pid:int, kwargs:dict={}):
+def genMCD_MP(SD:StarContainer, pid:int, kwargs:dict={}):
     """
     Calculates new Parameters after variating Star Data adn writes them to file
     Parameters
@@ -1983,7 +773,7 @@ def evaMCD(_fig, file:str):
         plt.figtext(0.01, 0.15 + 0.825/6 * (5-i), histName[i], {'ha':'left', 'size':9})
 
 
-def DrawChi2Slice(_fig, SD:DataContainer, parVec:list, bounds:list, IndexList:list, _dim:int=50, kwargs:dict={}):
+def DrawChi2Slice(_fig, SD:StarContainer, parVec:list, bounds:list, IndexList:list, _dim:int=50, kwargs:dict={}):
     """
     Draws chi2 distribution for M and R
     Parameters
@@ -2196,7 +986,7 @@ def determineDeltaOmega(FD:FitContainer) -> list:
         print("found no minimal point!")
 
 
-def FindChiError(_fig, FD:FitContainer, SD:DataContainer, selIn:list, OPT:dict, start:float, stop:float, step:int, index:int):
+def FindChiError(_fig, FD:FitContainer, SD:StarContainer, selIn:list, OPT:dict, start:float, stop:float, step:int, index:int):
     """
     Plot a series of Chi^2 points for variation of Parameter [index] from [start] to [stop] in [step] steps.
 
@@ -2295,7 +1085,6 @@ if __name__ == "__main__":
     Fit             str         None, Local, Full
     Stepsize        int         stepsize to use in integrator
     Pbar            bool        use progressbar? disabled for multi processing
-    useFile         bool        output orbit to file? used for stepsizes under 1E-12
     File            str         Output File for Ensemble Test
     UseSGRA_Pos     bool        variate position of Sgr A*?
     
@@ -2305,12 +1094,11 @@ if __name__ == "__main__":
 
     # Options used for Initial Orbit Calculation
     OPTIONS = {
-        'method': 'Schwarz', 
-        'grav-red': True, 
+        'method': 'Newton', 
+        'grav-red': False, 
         'Fit': 'None', 
-        'Stepsize': 1E-9,
-        'Pbar': True,
-        'useFile': False
+        'Stepsize': 1E-8,
+        'Pbar': True
         }
 
     #------------------------------------------------------------------------------------------
@@ -2370,7 +1158,7 @@ if __name__ == "__main__":
     #------------------------------------------------------------------------------------------
 
     # Show Plots
-    plot4Ways(_fig=MAIN_fig, SD=_SD, FD=minFD, _in=selIndex)           # plot the 2 views at once
+    plot2Ways(_fig=MAIN_fig, SD=_SD, FD=minFD, _in=selIndex)           # plot the 2 views at once
     #plotDataAndFit(MAIN_fig, _SD, FD=minFD)                    # plot just the orbit in big
 
 
